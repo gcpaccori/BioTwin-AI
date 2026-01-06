@@ -9,6 +9,10 @@ from flask_cors import CORS
 from sqlalchemy import create_engine, text, inspect
 from sklearn.linear_model import LinearRegression
 
+
+import pymysql
+
+
 # --- CONFIGURACIÓN ---
 app = Flask(__name__)
 CORS(app)
@@ -61,6 +65,64 @@ def calcular_color_agua(nitrato):
 @app.route('/')
 def health_check():
     return jsonify({"status": "online", "system": "BioTwin AI V2.0", "version": "2.0.0"}), 200
+
+
+@app.route('/api/v1/sensor-detail/<int:pool_id>', methods=['GET'])
+def get_sensor_detail(pool_id):
+    sensor_type = request.args.get('sensor', 'temperature')
+    period = request.args.get('period', '24h')
+    
+    # Calcular fecha de inicio según el período
+    now = datetime.now()
+    if period == '6h':
+        start_date = now - timedelta(hours=6)
+    elif period == '24h':
+        start_date = now - timedelta(hours=24)
+    elif period == '7d':
+        start_date = now - timedelta(days=7)
+    elif period == '30d':
+        start_date = now - timedelta(days=30)
+    else:
+        start_date = now - timedelta(hours=24)
+    
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Mapeo de nombres de sensores a columnas de BD
+    sensor_columns = {
+        'temperature': 'temperatura',
+        'ph': 'ph',
+        'oxygen': 'oxigeno_disuelto',
+        'nitrate': 'ion_nitrato'
+    }
+    
+    column = sensor_columns.get(sensor_type, 'temperatura')
+    
+    # Obtener datos del sensor principal
+    query_main = f"""
+        SELECT fecha_medicion, {column}
+        FROM parametro_aguas
+        WHERE piscina_id = %s 
+        AND fecha_medicion >= %s
+        AND deleted_at IS NULL
+        ORDER BY fecha_medicion ASC
+    """
+    cursor.execute(query_main, (pool_id, start_date))
+    main_results = cursor.fetchall()
+    
+    main_data = [{
+        'timestamp': row[0].isoformat(),
+        'value': float(row[1]) if row[1] else 0
+    } for row in main_results]
+    
+    cursor.close()
+    conn.close()
+    
+    return jsonify({
+        'main': main_data
+    })
+
+
 
 @app.route('/api/v1/biofloc/history/<int:pool_id>', methods=['GET'])
 def get_sensor_history(pool_id):
@@ -389,3 +451,4 @@ def get_system_health():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080)
+
