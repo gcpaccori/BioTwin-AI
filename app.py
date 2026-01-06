@@ -9,58 +9,83 @@ import pandas as pd
 
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import OperationalError
+
 from sklearn.linear_model import LinearRegression
 
-# =========================
-# CONFIGURACIÓN APP
-# =========================
+# =========================================================
+# CONFIGURACIÓN FLASK
+# =========================================================
 app = Flask(__name__)
 CORS(app)
 
-# =========================
-# CONFIGURACIÓN DB
-# =========================
-DB_HOST = os.getenv('DB_HOST', '37.60.226.53')
-DB_USER = os.getenv('DB_USER', 'root')
-DB_PASS = os.getenv('DB_PASS', 'sismapiscis2025')
-DB_NAME = os.getenv('DB_NAME', 'sismapiscis')
+# =========================================================
+# CONFIGURACIÓN BASE DE DATOS
+# =========================================================
+DB_HOST = os.getenv("DB_HOST", "37.60.226.53")
+DB_USER = os.getenv("DB_USER", "root")
+DB_PASS = os.getenv("DB_PASS", "sismapiscis2025")
+DB_NAME = os.getenv("DB_NAME", "sismapiscis")
+DB_PORT = int(os.getenv("DB_PORT", "3306"))
 
-db_url = f"mysql+pymysql://{DB_USER}:{DB_PASS}@{DB_HOST}:3306/{DB_NAME}"
+DATABASE_URL = (
+    f"mysql+pymysql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+)
 
-# Engine LAZY (CRÍTICO PARA LEAPCELL)
 _engine = None
 
+
 def get_engine():
+    """
+    Crea el engine SOLO cuando se necesita.
+    Evita timeouts en gunicorn / Leapcell.
+    """
     global _engine
     if _engine is None:
-        print("🚀 BioTwin AI conectando a MySQL…")
+        print("🚀 Inicializando conexión MySQL (lazy)")
         _engine = create_engine(
-            db_url,
+            DATABASE_URL,
             pool_pre_ping=True,
             pool_recycle=3600,
-            connect_args={
-                "connect_timeout": 3,
-                "read_timeout": 5,
-                "write_timeout": 5
-            }
+            connect_args={"connect_timeout": 5},
         )
     return _engine
+
 
 def get_db_connection():
     return get_engine().connect()
 
-# =========================
-# ENDPOINT BASE (OBLIGATORIO)
-# =========================
-@app.route("/", methods=["GET"])
-def root():
-    return "BioTwin AI OK", 200
 
-# =========================
+# =========================================================
+# ENDPOINT ROOT – TEST DE VIDA + DB
+# =========================================================
+@app.route("/", methods=["GET"])
+def root_health():
+    """
+    Endpoint obligatorio para Leapcell.
+    Verifica si la app vive y si MySQL responde.
+    """
+    try:
+        with get_db_connection() as conn:
+            conn.execute(text("SELECT 1"))
+        return jsonify({
+            "status": "ok",
+            "service": "BioTwin AI Backend",
+            "database": "connected"
+        })
+    except Exception as e:
+        return jsonify({
+            "status": "warning",
+            "service": "BioTwin AI Backend",
+            "database": "not_connected",
+            "error": str(e)
+        }), 503
+
+
+# =========================================================
 # UTILIDADES
-# =========================
+# =========================================================
 def calcular_color_agua(nitrato):
     if nitrato <= 10:
         return "#0EA5E9"
@@ -68,22 +93,22 @@ def calcular_color_agua(nitrato):
         return "#22C55E"
     return "#854D0E"
 
-# =========================
-# API V1
-# =========================
 
-@app.route('/api/v1/biofloc/status/<int:pool_id>', methods=['GET'])
+# =========================================================
+# API V1 – BIOFLOC STATUS
+# =========================================================
+@app.route("/api/v1/biofloc/status/<int:pool_id>", methods=["GET"])
 def get_biofloc_status(pool_id):
     try:
         with get_db_connection() as conn:
-            query = text("""
+            q = text("""
                 SELECT ion_nitrato, oxigeno_disuelto, ph, temperatura
                 FROM parametro_aguas
                 WHERE piscina_id = :pid
                 ORDER BY fecha_medicion DESC
                 LIMIT 1
             """)
-            row = conn.execute(query, {"pid": pool_id}).fetchone()
+            row = conn.execute(q, {"pid": pool_id}).fetchone()
 
             if not row:
                 return jsonify({
@@ -109,7 +134,7 @@ def get_biofloc_status(pool_id):
                 carbon_amount_gr = round(carbon_demand * 20, 2)
 
             dosing_locked = o2 < 4.0
-            estado_critico = nitrato > 50.0 or o2 < 3.0
+            estado_critico = nitrato > 50 or o2 < 3.0
 
             return jsonify({
                 "ion_nitrato": round(float(nitrato), 2),
@@ -121,113 +146,110 @@ def get_biofloc_status(pool_id):
                 "dosing_locked": dosing_locked,
                 "carbon_amount_gr": carbon_amount_gr
             })
-
     except Exception as e:
-        print("Error biofloc:", e)
         return jsonify({"error": str(e)}), 500
 
 
-@app.route('/api/v1/digital-twin/config/<int:pool_id>', methods=['GET'])
+# =========================================================
+# API V1 – DIGITAL TWIN CONFIG
+# =========================================================
+@app.route("/api/v1/digital-twin/config/<int:pool_id>", methods=["GET"])
 def get_digital_twin_config(pool_id):
     try:
         with get_db_connection() as conn:
             pool = conn.execute(
-                text("SELECT largo, ancho, profundidad FROM piscinas WHERE id = :pid"),
-                {"pid": pool_id}
+                text("SELECT largo, ancho, profundidad FROM piscinas WHERE id=:id"),
+                {"id": pool_id}
             ).fetchone()
 
             water = conn.execute(
                 text("""
                     SELECT ion_nitrato
                     FROM parametro_aguas
-                    WHERE piscina_id = :pid
+                    WHERE piscina_id=:id
                     ORDER BY id DESC LIMIT 1
                 """),
-                {"pid": pool_id}
+                {"id": pool_id}
             ).fetchone()
 
             bio = conn.execute(
                 text("""
                     SELECT cantidad_muestreo, peso_promedio
                     FROM biometrias
-                    WHERE piscina_id = :pid
+                    WHERE piscina_id=:id
                     ORDER BY fecha_registro DESC LIMIT 1
                 """),
-                {"pid": pool_id}
+                {"id": pool_id}
             ).fetchone()
 
             l, w, d = pool if pool else (10, 5, 1.2)
             nitrato = water[0] if water else 0
-            fish_count = bio[0] if bio else 1000
-            avg_weight = bio[1] if bio else 10.0
-
-            turbidity = min(nitrato / 100.0, 1.0)
+            fish_count, avg_weight = bio if bio else (1000, 10)
 
             return jsonify({
                 "dimensions": {"l": float(l), "w": float(w), "d": float(d)},
                 "water_quality": {
                     "color_hex": calcular_color_agua(nitrato),
-                    "turbidity_factor": float(turbidity)
+                    "turbidity_factor": min(nitrato / 100, 1.0)
                 },
                 "biomass": {
                     "fish_count": int(fish_count),
                     "avg_weight": float(avg_weight)
                 }
             })
-
     except Exception as e:
-        print("Error digital twin:", e)
         return jsonify({"error": str(e)}), 500
 
 
-@app.route('/api/v1/predict/oxygen/<int:pool_id>', methods=['GET'])
+# =========================================================
+# API V1 – OXYGEN PREDICTION
+# =========================================================
+@app.route("/api/v1/predict/oxygen/<int:pool_id>", methods=["GET"])
 def get_oxygen_prediction(pool_id):
     try:
-        query = text("""
-            SELECT fecha_medicion, oxigeno_disuelto, temperatura, ph, ion_nitrato
-            FROM parametro_aguas
-            WHERE piscina_id = :pid
-            ORDER BY fecha_medicion DESC
-            LIMIT 100
-        """)
-        df = pd.read_sql(query, get_engine(), params={"pid": pool_id})
+        df = pd.read_sql(
+            text("""
+                SELECT fecha_medicion, oxigeno_disuelto, temperatura, ph, ion_nitrato
+                FROM parametro_aguas
+                WHERE piscina_id=:id
+                ORDER BY fecha_medicion DESC
+                LIMIT 100
+            """),
+            get_engine(),
+            params={"id": pool_id}
+        )
 
         if df.empty:
             return jsonify({"forecast": [], "confidence": 0, "alerts": []})
 
-        df['fecha_medicion'] = pd.to_datetime(df['fecha_medicion'])
-        df = df.sort_values('fecha_medicion')
-        df['timestamp'] = df['fecha_medicion'].astype(int) // 10**9
-
-        X = df[['timestamp', 'temperatura']]
-        y = df['oxigeno_disuelto']
+        df["fecha_medicion"] = pd.to_datetime(df["fecha_medicion"])
+        df = df.sort_values("fecha_medicion")
+        df["timestamp"] = df["fecha_medicion"].astype("int64") // 10**9
 
         model = LinearRegression()
-        model.fit(X, y)
+        model.fit(df[["timestamp", "temperatura"]], df["oxigeno_disuelto"])
 
-        last_time = df['fecha_medicion'].iloc[-1]
-        last_temp = df['temperatura'].iloc[-1]
+        last_time = df["fecha_medicion"].iloc[-1]
+        last_temp = df["temperatura"].iloc[-1]
 
-        forecast = []
-        alerts = []
+        forecast, alerts = [], []
 
         for i in range(1, 9):
-            future_time = last_time + timedelta(minutes=30 * i)
-            ts = int(future_time.timestamp())
-            pred = model.predict([[ts, last_temp]])[0]
+            ft = last_time + timedelta(minutes=30 * i)
+            pred = model.predict([[int(ft.timestamp()), last_temp]])[0]
 
             forecast.append({
-                "time": future_time.strftime("%H:%M"),
-                "value": round(float(pred), 2),
-                "lower_bound": round(float(pred - 0.5), 2),
-                "upper_bound": round(float(pred + 0.5), 2)
+                "time": ft.strftime("%H:%M"),
+                "value": round(pred, 2),
+                "lower_bound": round(pred - 0.5, 2),
+                "upper_bound": round(pred + 0.5, 2),
             })
 
-            if pred < 3.0 and not any(a["severity"] == "critical" for a in alerts):
+            if pred < 3 and not alerts:
                 alerts.append({
                     "title": "CRUCE CRÍTICO DETECTADO",
-                    "time": future_time.strftime("%H:%M"),
-                    "description": f"O2 < 3.0 mg/L ({round(pred,1)})",
+                    "time": ft.strftime("%H:%M"),
+                    "description": "Riesgo de hipoxia inminente",
                     "severity": "critical"
                 })
 
@@ -238,26 +260,11 @@ def get_oxygen_prediction(pool_id):
         })
 
     except Exception as e:
-        print("Error predicción:", e)
         return jsonify({"error": str(e)}), 500
 
 
-@app.route('/api/v1/system/health', methods=['GET'])
-def get_system_health():
-    try:
-        with get_db_connection() as conn:
-            count = conn.execute(
-                text("SELECT COUNT(*) FROM parametro_aguas")
-            ).fetchone()[0]
-
-            return jsonify({
-                "cleaned_records": int(count * 0.15),
-                "imputed_records": int(count * 0.05),
-                "avg_latency_ms": 0,
-                "sensors": [],
-                "logs": []
-            })
-
-    except Exception as e:
-        print("Error health:", e)
-        return jsonify({"error": str(e)}), 500
+# =========================================================
+# MAIN (solo para local)
+# =========================================================
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8080, debug=True)
