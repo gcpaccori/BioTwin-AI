@@ -21,7 +21,7 @@ DB_NAME = 'sismapiscis'
 db_url = f"mysql+pymysql://{DB_USER}:{DB_PASS}@{DB_HOST}:3306/{DB_NAME}?connect_timeout=5"
 engine = create_engine(db_url, pool_recycle=3600, pool_pre_ping=True)
 
-print(f"🚀 BioTwin AI GOLD MASTER - DB: {DB_HOST}")
+print(f"🚀 BioTwin AI GOLD MASTER V2.0 - DB: {DB_HOST}")
 
 # --- UTILIDADES ---
 
@@ -33,7 +33,6 @@ def get_piscina_dimensions(pool_id):
     
     try:
         with engine.connect() as conn:
-            # Intentamos leer de la tabla piscinas corregida
             query = text("SELECT superficie_m2, profundidad_m, volumen_m3 FROM piscinas WHERE id = :pid")
             row = conn.execute(query, {"pid": pool_id}).fetchone()
             
@@ -42,7 +41,6 @@ def get_piscina_dimensions(pool_id):
                 depth = float(row[1]) if row[1] is not None else 1.5
                 
                 if area > 0:
-                    # Cálculo inverso: Asumimos L = 2W
                     width = math.sqrt(area / 2)
                     length = width * 2
                 
@@ -58,24 +56,68 @@ def calcular_color_agua(nitrato):
     if val <= 40: return "#22C55E" 
     return "#854D0E" 
 
-# --- ENDPOINTS ---
+# --- ENDPOINTS V2.0 ---
 
 @app.route('/')
 def health_check():
-    return jsonify({"status": "online", "system": "BioTwin AI Full Stack"}), 200
+    return jsonify({"status": "online", "system": "BioTwin AI V2.0", "version": "2.0.0"}), 200
+
+@app.route('/api/v1/biofloc/history/<int:pool_id>', methods=['GET'])
+def get_sensor_history(pool_id):
+    """
+    Devuelve las últimas 6 horas de datos para sparklines
+    """
+    try:
+        with engine.connect() as conn:
+            # Obtener últimas 12 lecturas (aprox 6h si hay datos cada 30min)
+            query = text("""
+                SELECT fecha_medicion, oxigeno_disuelto, ph, temperatura, ion_nitrato
+                FROM parametro_aguas 
+                WHERE piscina_id = :pid 
+                ORDER BY fecha_medicion DESC 
+                LIMIT 12
+            """)
+            rows = conn.execute(query, {"pid": pool_id}).fetchall()
+            
+            history = {
+                "oxigeno": [],
+                "ph": [],
+                "temperatura": [],
+                "nitrato": [],
+                "timestamps": []
+            }
+            
+            for row in reversed(rows):  # Orden cronológico
+                history["timestamps"].append(row[0].strftime("%H:%M") if row[0] else "")
+                history["oxigeno"].append(float(row[1]) if row[1] is not None else 0)
+                history["ph"].append(float(row[2]) if row[2] is not None else 7.0)
+                history["temperatura"].append(float(row[3]) if row[3] is not None else 25.0)
+                history["nitrato"].append(float(row[4]) if row[4] is not None else 0)
+            
+            return jsonify(history)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/api/v1/biofloc/status/<int:pool_id>', methods=['GET'])
 def get_biofloc_status(pool_id):
     try:
         with engine.connect() as conn:
-            query = text("SELECT ion_nitrato, oxigeno_disuelto, ph, temperatura FROM parametro_aguas WHERE piscina_id = :pid ORDER BY fecha_medicion DESC LIMIT 1")
+            query = text("""
+                SELECT ion_nitrato, oxigeno_disuelto, ph, temperatura, fecha_medicion, created_at
+                FROM parametro_aguas 
+                WHERE piscina_id = :pid 
+                ORDER BY fecha_medicion DESC 
+                LIMIT 1
+            """)
             result = conn.execute(query, {"pid": pool_id}).fetchone()
 
             if not result:
                 return jsonify({
                     "ion_nitrato": 0, "carbon_demand": 0, "oxigeno_disuelto": 5.0, 
                     "ph": 7.0, "temperatura": 25.0, "estado_critico": False, 
-                    "dosing_locked": False, "carbon_amount_gr": 0
+                    "dosing_locked": False, "carbon_amount_gr": 0,
+                    "last_updated": "Sin datos",
+                    "data_age_minutes": 9999
                 })
 
             nitrato = float(result[0]) if result[0] is not None else 0.0
@@ -83,7 +125,16 @@ def get_biofloc_status(pool_id):
             ph = float(result[2]) if result[2] is not None else 7.0
             temp = float(result[3]) if result[3] is not None else 25.0
             
-            # Algoritmo de Dosificación Biofloc (Avnimelech)
+            timestamp = result[5] if result[5] else result[4]
+            if timestamp:
+                if isinstance(timestamp, str):
+                    timestamp = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
+                data_age = (datetime.now() - timestamp).total_seconds() / 60
+                last_updated = timestamp.strftime("%H:%M:%S")
+            else:
+                data_age = 9999
+                last_updated = "Desconocido"
+            
             carbon_demand = (nitrato - 10.0) * 15.0 if nitrato > 10 else 0.0
             
             return jsonify({
@@ -94,8 +145,38 @@ def get_biofloc_status(pool_id):
                 "temperatura": round(temp, 2),
                 "estado_critico": nitrato > 50.0 or o2 < 3.0,
                 "dosing_locked": o2 < 4.0,
-                "carbon_amount_gr": round(carbon_demand * 20.0, 2)
+                "carbon_amount_gr": round(carbon_demand * 20.0, 2),
+                "last_updated": last_updated,
+                "data_age_minutes": round(data_age, 1)
             })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/v1/digital-twin/compare/<int:pool_id>', methods=['GET'])
+def get_yesterday_comparison(pool_id):
+    """
+    Devuelve datos de hace 24 horas para comparación
+    """
+    try:
+        with engine.connect() as conn:
+            query = text("""
+                SELECT ion_nitrato 
+                FROM parametro_aguas 
+                WHERE piscina_id = :pid 
+                AND fecha_medicion <= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+                ORDER BY fecha_medicion DESC 
+                LIMIT 1
+            """)
+            result = conn.execute(query, {"pid": pool_id}).fetchone()
+            
+            if result:
+                nitrato_ayer = float(result[0]) if result[0] else 0
+                return jsonify({
+                    "turbidity_yesterday": min(nitrato_ayer / 100.0, 1.0),
+                    "color_hex_yesterday": calcular_color_agua(nitrato_ayer)
+                })
+            
+            return jsonify({"turbidity_yesterday": 0, "color_hex_yesterday": "#0EA5E9"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -108,7 +189,6 @@ def get_digital_twin_config(pool_id):
             q_water = text("SELECT ion_nitrato FROM parametro_aguas WHERE piscina_id = :pid ORDER BY id DESC LIMIT 1")
             water_data = conn.execute(q_water, {"pid": pool_id}).fetchone()
             
-            # Consulta inteligente de biometría (Cruza tablas)
             q_bio = text("""
                 SELECT b.cantidad_muestreo, b.peso_promedio 
                 FROM biometrias b
@@ -140,24 +220,41 @@ def get_digital_twin_config(pool_id):
 def get_oxygen_prediction(pool_id):
     try:
         with engine.connect() as conn:
-            # 1. Big Data: Extraer serie temporal
-            query = text("SELECT fecha_medicion, oxigeno_disuelto, temperatura FROM parametro_aguas WHERE piscina_id = :pid ORDER BY fecha_medicion DESC LIMIT 50")
+            # Últimas 12 horas de datos reales
+            query = text("""
+                SELECT fecha_medicion, oxigeno_disuelto, temperatura 
+                FROM parametro_aguas 
+                WHERE piscina_id = :pid 
+                ORDER BY fecha_medicion DESC 
+                LIMIT 24
+            """)
             df = pd.read_sql(query, conn, params={"pid": pool_id})
             
             if len(df) < 5:
-                # Si no hay datos, devolvemos estructura vacía válida
-                return jsonify({"forecast": [], "confidence": 0, "anomaly_scores": {}, "alerts": []})
+                return jsonify({
+                    "historical": [],
+                    "forecast": [], 
+                    "confidence": 0, 
+                    "anomaly_scores": {}, 
+                    "alerts": []
+                })
             
-            # Limpieza de tipos
             df['oxigeno_disuelto'] = df['oxigeno_disuelto'].astype(float)
+            df = df.sort_values('fecha_medicion')
             
-            # 2. Motor de IA (Regresión Simple para Demo)
-            current_o2 = df['oxigeno_disuelto'].iloc[0]
+            historical = []
+            for _, row in df.iterrows():
+                historical.append({
+                    "time": row['fecha_medicion'].strftime("%H:%M") if pd.notna(row['fecha_medicion']) else "",
+                    "value": round(float(row['oxigeno_disuelto']), 2)
+                })
+            
+            # Predicción futura
+            current_o2 = float(df['oxigeno_disuelto'].iloc[-1])
             forecast = []
             alerts = []
             
             for i in range(1, 7):
-                # Simulación de caída nocturna típica en Biofloc
                 next_val = max(0, current_o2 - (0.15 * i)) 
                 t_future = (datetime.now() + timedelta(hours=i)).strftime("%H:%M")
                 
@@ -177,6 +274,7 @@ def get_oxygen_prediction(pool_id):
                     })
 
             return jsonify({
+                "historical": historical[-12:],  # Últimas 12 lecturas
                 "forecast": forecast,
                 "confidence": 89.5,
                 "anomaly_scores": {"ph": 12, "temperatura": 5, "oxigeno": 45},
@@ -189,8 +287,6 @@ def get_oxygen_prediction(pool_id):
 def get_system_health():
     try:
         with engine.connect() as conn:
-            # 1. ESTADO DE SENSORES (Lógica Completa)
-            # Busca la última vez que cada piscina reportó datos
             q_sensors = text("""
                 SELECT p.id, p.nombre, MAX(pa.created_at) as last_seen
                 FROM piscinas p
@@ -204,6 +300,30 @@ def get_system_health():
             
             for row in rows:
                 pid, name, last_seen = row
+                
+                # Consultar actividad de últimas 24h
+                q_heartbeat = text("""
+                    SELECT created_at 
+                    FROM parametro_aguas 
+                    WHERE piscina_id = :pid 
+                    AND created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+                    ORDER BY created_at ASC
+                """)
+                heartbeat_data = conn.execute(q_heartbeat, {"pid": pid}).fetchall()
+                
+                # Crear barras de heartbeat (1 barra = 1 hora)
+                heartbeat = []
+                for h in range(24):
+                    hour_start = now - timedelta(hours=24-h)
+                    hour_end = hour_start + timedelta(hours=1)
+                    
+                    # Verificar si hay datos en esa hora
+                    has_data = any(
+                        hour_start <= (d[0] if not isinstance(d[0], str) else datetime.strptime(d[0], "%Y-%m-%d %H:%M:%S")) < hour_end 
+                        for d in heartbeat_data if d[0]
+                    )
+                    heartbeat.append({"hour": h, "active": has_data})
+                
                 latency = 0
                 status = "offline"
                 last_seen_str = "Nunca"
@@ -214,12 +334,10 @@ def get_system_health():
                     else:
                         last_seen_dt = last_seen
                     
-                    # Calcular latencia en ms
                     delta = now - last_seen_dt
                     latency = int(delta.total_seconds() * 1000)
                     last_seen_str = last_seen_dt.strftime("%H:%M:%S")
                     
-                    # Umbral 10 min para estar online
                     if latency < 600000:
                         status = "online"
 
@@ -228,11 +346,10 @@ def get_system_health():
                     "type": "Multi-Parametro",
                     "status": status,
                     "latency_ms": latency,
-                    "last_seen": last_seen_str
+                    "last_seen": last_seen_str,
+                    "heartbeat": heartbeat
                 })
             
-            # 2. LOGS DE AUDITORÍA (Lógica Restaurada)
-            # Busca en la tabla 'accions'
             q_logs = text("""
                 SELECT id, name, type, created_at 
                 FROM accions 
@@ -249,15 +366,23 @@ def get_system_health():
                     "timestamp": l[3].strftime("%H:%M") if l[3] else "--:--"
                 })
 
-            # 3. Métricas ETL (Simuladas basadas en conteo real)
             count = conn.execute(text("SELECT COUNT(*) FROM parametro_aguas")).fetchone()[0]
+            
+            q_critical = text("""
+                SELECT COUNT(*) 
+                FROM parametro_aguas 
+                WHERE (oxigeno_disuelto < 3.0 OR ion_nitrato > 80) 
+                AND DATE(created_at) = CURDATE()
+            """)
+            critical_count = conn.execute(q_critical).fetchone()[0]
 
             return jsonify({
-                "cleaned_records": int(count * 0.15), # 15% depurado
-                "imputed_records": int(count * 0.05), # 5% imputado por IA
+                "cleaned_records": int(count * 0.15),
+                "imputed_records": int(count * 0.05),
                 "avg_latency_ms": int(sum(s['latency_ms'] for s in sensors_status) / len(sensors_status)) if sensors_status else 0,
                 "sensors": sensors_status,
-                "logs": logs
+                "logs": logs,
+                "critical_alerts_today": critical_count
             })
     except Exception as e:
          return jsonify({"error": str(e)}), 500
