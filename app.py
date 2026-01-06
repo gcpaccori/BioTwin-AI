@@ -16,7 +16,7 @@ CORS(app)
 
 # CONFIGURACIÓN DE BASE DE DATOS BLINDADA
 DB_USER = os.getenv('DB_USER', 'root')
-DB_PASS = os.getenv('DB_PASS', '') 
+DB_PASS = os.getenv('DB_PASS', 'sismapiscis2025') 
 DB_HOST = os.getenv('DB_HOST', '37.60.226.53')
 DB_NAME = 'sismapiscis'
 
@@ -246,3 +246,4 @@ def get_system_health():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080)
+
