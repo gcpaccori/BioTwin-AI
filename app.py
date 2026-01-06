@@ -51,41 +51,25 @@ def get_db_connection():
 # =====================================================
 # ENDPOINT ROOT (HEALTHCHECK REAL)
 # =====================================================
-# @app.route('/', methods=['GET'])
-# def root():
-#    try:
-#        with get_db_connection() as conn:
-#            conn.execute(text("SELECT 1"))
-#        return jsonify({
-#            "status": "ok",
-#            "service": "BioTwin AI Backend",
-#            "database": "connected",
-#            "timestamp": datetime.utcnow().isoformat()
-#        })
-#    except Exception as e:
-#        return jsonify({
-#            "status": "warning",
-#            "service": "BioTwin AI Backend",
-#            "database": "not_connected",
-#            "error": str(e)
-#       }), 200
-
-
-
-@app.route("/")
-def health():
+@app.route('/', methods=['GET'])
+def root():
     try:
-        with engine.connect() as conn:
+        with get_db_connection() as conn:
             conn.execute(text("SELECT 1"))
-        db_status = "connected"
+        return jsonify({
+            "status": "ok",
+            "service": "BioTwin AI Backend",
+            "database": "connected",
+            "timestamp": datetime.utcnow().isoformat()
+        })
     except Exception as e:
-        db_status = "error"
+        return jsonify({
+            "status": "warning",
+            "service": "BioTwin AI Backend",
+            "database": "not_connected",
+            "error": str(e)
+       }), 200
 
-    return jsonify({
-        "status": "ok",
-        "service": "BioTwin AI Backend",
-        "database": db_status
-    })
 
 
 
@@ -349,5 +333,6 @@ def get_system_health():
 # --- ARRANQUE ---
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
+
 
 
