@@ -261,6 +261,107 @@ def get_system_health():
             })
     except Exception as e:
          return jsonify({"error": str(e)}), 500
+        
+# Agrega este endpoint a tu app.py de Flask
+
+@app.route('/api/v1/digital-twin/config/<int:pool_id>', methods=['GET'])
+def get_digital_twin_config(pool_id):
+    """
+    Endpoint para obtener configuración del gemelo digital 3D
+    Consulta datos reales de la base de datos
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+        
+        # 1. Obtener dimensiones de la piscina
+        cursor.execute("""
+            SELECT 
+                id,
+                nombre,
+                largo_m as l,
+                ancho_m as w,
+                profundidad_m as d,
+                volumen_m3
+            FROM piscinas
+            WHERE id = %s AND deleted_at IS NULL
+        """, (pool_id,))
+        piscina = cursor.fetchone()
+        
+        if not piscina:
+            return jsonify({"error": f"Piscina {pool_id} no encontrada"}), 404
+        
+        # 2. Obtener última medición de calidad del agua
+        cursor.execute("""
+            SELECT 
+                temperatura,
+                ph,
+                oxigeno_disuelto,
+                ion_nitrato as nitrate,
+                fecha_medicion
+            FROM parametro_aguas
+            WHERE piscina_id = %s 
+            AND deleted_at IS NULL
+            ORDER BY fecha_medicion DESC
+            LIMIT 1
+        """, (pool_id,))
+        water_params = cursor.fetchone()
+        
+        # 3. Obtener biomasa actual (de la campaña activa)
+        cursor.execute("""
+            SELECT 
+                ce.numero_peces_final as fish_count,
+                ce.peso_final_gr as avg_weight
+            FROM campania_etapas ce
+            INNER JOIN campania_especies cs ON ce.campania_especie_id = cs.id
+            INNER JOIN campanias c ON cs.campania_id = c.id
+            WHERE ce.piscina_id = %s 
+            AND c.estado = 'en_proceso'
+            AND ce.deleted_at IS NULL
+            ORDER BY ce.fecha_inicio DESC
+            LIMIT 1
+        """, (pool_id,))
+        biomass = cursor.fetchone()
+        
+        cursor.close()
+        conn.close()
+        
+        # Calcular turbidez basada en nitratos
+        # 0-30 mg/L = Cristalino (0-0.3)
+        # 30-60 mg/L = Ligeramente Turbio (0.3-0.6)
+        # 60-100+ mg/L = Turbio (0.6-1.0)
+        nitrate_level = water_params['nitrate'] if water_params and water_params['nitrate'] else 0
+        turbidity_factor = min(nitrate_level / 100.0, 1.0)
+        
+        return jsonify({
+            "pool_id": pool_id,
+            "pool_name": piscina['nombre'],
+            "dimensions": {
+                "l": float(piscina['l']),
+                "w": float(piscina['w']),
+                "d": float(piscina['d']),
+                "volume_m3": float(piscina['volumen_m3'])
+            },
+            "water_quality": {
+                "temperature": float(water_params['temperatura']) if water_params and water_params['temperatura'] else 28.0,
+                "ph": float(water_params['ph']) if water_params and water_params['ph'] else 7.0,
+                "dissolved_oxygen": float(water_params['oxigeno_disuelto']) if water_params and water_params['oxigeno_disuelto'] else 5.0,
+                "nitrate": float(nitrate_level),  # <-- IMPORTANTE: Este valor se usa para el color
+                "turbidity_factor": turbidity_factor,  # <-- Coincide con el indicador
+                "last_updated": water_params['fecha_medicion'].isoformat() if water_params and water_params['fecha_medicion'] else None
+            },
+            "biomass": {
+                "fish_count": int(biomass['fish_count']) if biomass and biomass['fish_count'] else 0,
+                "avg_weight": float(biomass['avg_weight']) if biomass and biomass['avg_weight'] else 0
+            }
+        })
+        
+    except Exception as e:
+        print(f"Error en digital twin config: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080)
+
