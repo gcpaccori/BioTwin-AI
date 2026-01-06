@@ -99,42 +99,6 @@ def get_biofloc_status(pool_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/api/v1/digital-twin/config/<int:pool_id>', methods=['GET'])
-def get_digital_twin_config(pool_id):
-    try:
-        l, w, d = get_piscina_dimensions(pool_id)
-        
-        with engine.connect() as conn:
-            q_water = text("SELECT ion_nitrato FROM parametro_aguas WHERE piscina_id = :pid ORDER BY id DESC LIMIT 1")
-            water_data = conn.execute(q_water, {"pid": pool_id}).fetchone()
-            
-            # Consulta inteligente de biometría (Cruza tablas)
-            q_bio = text("""
-                SELECT b.cantidad_muestreo, b.peso_promedio 
-                FROM biometrias b
-                JOIN campania_etapas ce ON b.campania_etapa_id = ce.id
-                WHERE ce.piscina_id = :pid 
-                ORDER BY b.fecha_muestreo DESC LIMIT 1
-            """)
-            try:
-                bio_data = conn.execute(q_bio, {"pid": pool_id}).fetchone()
-            except:
-                bio_data = None
-
-            nitrato = float(water_data[0]) if water_data and water_data[0] is not None else 0.0
-            fish_count = int(bio_data[0]) if bio_data and bio_data[0] is not None else 2500
-            avg_weight = float(bio_data[1]) if bio_data and bio_data[1] is not None else 15.0
-            
-            return jsonify({
-                "dimensions": { "l": l, "w": w, "d": d },
-                "water_quality": { 
-                    "color_hex": calcular_color_agua(nitrato), 
-                    "turbidity_factor": min(nitrato / 100.0, 1.0) 
-                },
-                "biomass": { "fish_count": fish_count, "avg_weight": avg_weight }
-            })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
 @app.route('/api/v1/predict/oxygen/<int:pool_id>', methods=['GET'])
 def get_oxygen_prediction(pool_id):
@@ -364,4 +328,5 @@ def get_digital_twin_config(pool_id):
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080)
+
 
