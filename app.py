@@ -107,10 +107,12 @@ def health_check():
 @app.route("/api/v1/sensor-detail/<int:pool_id>", methods=["GET"])
 def get_sensor_detail(pool_id: int):
     """
-    Devuelve serie temporal del sensor (usando timestamp efectivo para arreglar fecha_medicion mala).
+    Devuelve serie temporal del sensor principal + sensores cruzados.
     """
     sensor_type = request.args.get("sensor", "temperature")
     period = request.args.get("period", "24h")
+    cross_sensors_param = request.args.get("crossSensors", "")
+    cross_sensors = [s.strip() for s in cross_sensors_param.split(",") if s.strip()]
 
     sensor_columns = {
         "temperature": "temperatura",
@@ -121,20 +123,20 @@ def get_sensor_detail(pool_id: int):
     column = sensor_columns.get(sensor_type, "temperatura")
     interval = period_to_mysql_interval(period)
 
-    # Nota: {column} viene de whitelist -> OK
-    query_main = f"""
-        SELECT
-            {TS_EFFECTIVE_EXPR} AS ts,
-            {column} AS val
-        FROM parametro_aguas
-        WHERE piscina_id = %s
-          AND deleted_at IS NULL
-          AND {TS_EFFECTIVE_EXPR} >= DATE_SUB(NOW(), INTERVAL {interval})
-        ORDER BY ts ASC
-    """
-
     conn = get_db_connection()
     try:
+        # Query principal
+        query_main = f"""
+            SELECT
+                {TS_EFFECTIVE_EXPR} AS ts,
+                {column} AS val
+            FROM parametro_aguas
+            WHERE piscina_id = %s
+              AND deleted_at IS NULL
+              AND {TS_EFFECTIVE_EXPR} >= DATE_SUB(NOW(), INTERVAL {interval})
+            ORDER BY ts ASC
+        """
+
         with conn.cursor() as cursor:
             cursor.execute(query_main, (pool_id,))
             rows = cursor.fetchall()
@@ -152,9 +154,43 @@ def get_sensor_detail(pool_id: int):
                 "value": float(val) if val is not None else 0
             })
 
-        return jsonify({"main": main_data})
+        cross_data = {}
+        if cross_sensors:
+            for cross_sensor in cross_sensors:
+                cross_column = sensor_columns.get(cross_sensor)
+                if not cross_column:
+                    continue
+                
+                query_cross = f"""
+                    SELECT
+                        {TS_EFFECTIVE_EXPR} AS ts,
+                        {cross_column} AS val
+                    FROM parametro_aguas
+                    WHERE piscina_id = %s
+                      AND deleted_at IS NULL
+                      AND {TS_EFFECTIVE_EXPR} >= DATE_SUB(NOW(), INTERVAL {interval})
+                    ORDER BY ts ASC
+                """
+                
+                with conn.cursor() as cursor:
+                    cursor.execute(query_cross, (pool_id,))
+                    cross_rows = cursor.fetchall()
+                
+                cross_data[cross_sensor] = []
+                for r in cross_rows:
+                    ts = r.get("ts")
+                    val = r.get("val")
+                    
+                    if ts is None:
+                        continue
+                    
+                    cross_data[cross_sensor].append({
+                        "timestamp": ts.isoformat() if isinstance(ts, datetime) else str(ts),
+                        "value": float(val) if val is not None else 0
+                    })
+
+        return jsonify({"main": main_data, "cross": cross_data})
     except Exception as e:
-        # Si quieres ver el error exacto en logs:
         print(f"❌ sensor-detail error: {e}")
         return jsonify({"error": str(e)}), 500
     finally:
