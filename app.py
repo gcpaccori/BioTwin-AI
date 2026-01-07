@@ -80,8 +80,7 @@ def health_check():
 def get_sensor_detail(pool_id):
     sensor_type = request.args.get('sensor', 'temperature')
     period = request.args.get('period', '24h')
-    
-    # Calcular fecha de inicio según el período
+
     now = datetime.now()
     if period == '6h':
         start_date = now - timedelta(hours=6)
@@ -93,43 +92,50 @@ def get_sensor_detail(pool_id):
         start_date = now - timedelta(days=30)
     else:
         start_date = now - timedelta(hours=24)
-    
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    # Mapeo de nombres de sensores a columnas de BD
+
     sensor_columns = {
         'temperature': 'temperatura',
         'ph': 'ph',
         'oxygen': 'oxigeno_disuelto',
         'nitrate': 'ion_nitrato'
     }
-    
     column = sensor_columns.get(sensor_type, 'temperatura')
-    
-    # Obtener datos del sensor principal
+
     query_main = f"""
-        SELECT fecha_medicion, {column}
+        SELECT
+            COALESCE(fecha_medicion, created_at) AS ts,
+            {column} AS val
         FROM parametro_aguas
-        WHERE piscina_id = %s 
-        AND fecha_medicion >= %s
-        AND deleted_at IS NULL
-        ORDER BY fecha_medicion ASC
+        WHERE piscina_id = %s
+          AND COALESCE(fecha_medicion, created_at) >= %s
+          AND deleted_at IS NULL
+        ORDER BY ts ASC
     """
-    cursor.execute(query_main, (pool_id, start_date))
-    main_results = cursor.fetchall()
-    
-    main_data = [{
-        'timestamp': row[0].isoformat(),
-        'value': float(row[1]) if row[1] else 0
-    } for row in main_results]
-    
-    cursor.close()
-    conn.close()
-    
-    return jsonify({
-        'main': main_data
-    })
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(query_main, (pool_id, start_date))
+            rows = cursor.fetchall()
+
+        main_data = []
+        for r in rows:
+            # con DictCursor, r es dict
+            ts = r.get("ts") if isinstance(r, dict) else r[0]
+            val = r.get("val") if isinstance(r, dict) else r[1]
+
+            if ts is None:
+                continue
+
+            main_data.append({
+                "timestamp": ts.isoformat() if isinstance(ts, datetime) else str(ts),
+                "value": float(val) if val is not None else 0
+            })
+
+        return jsonify({"main": main_data})
+    finally:
+        conn.close()
+
 
 @app.route('/api/v1/biofloc/history/<int:pool_id>', methods=['GET'])
 def get_sensor_history(pool_id):
@@ -458,3 +464,4 @@ def get_system_health():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080)
+
