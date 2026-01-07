@@ -9,9 +9,7 @@ from flask_cors import CORS
 from sqlalchemy import create_engine, text, inspect
 from sklearn.linear_model import LinearRegression
 
-
 import pymysql
-
 
 # --- CONFIGURACIÓN ---
 app = Flask(__name__)
@@ -60,12 +58,23 @@ def calcular_color_agua(nitrato):
     if val <= 40: return "#22C55E" 
     return "#854D0E" 
 
+def get_db_connection():
+    """
+    Crea una conexión directa a MySQL usando pymysql
+    """
+    return pymysql.connect(
+        host=DB_HOST,
+        user=DB_USER,
+        password=DB_PASS,
+        database=DB_NAME,
+        cursorclass=pymysql.cursors.DictCursor
+    )
+
 # --- ENDPOINTS V2.0 ---
 
 @app.route('/')
 def health_check():
     return jsonify({"status": "online", "system": "BioTwin AI V2.0", "version": "2.0.0"}), 200
-
 
 @app.route('/api/v1/sensor-detail/<int:pool_id>', methods=['GET'])
 def get_sensor_detail(pool_id):
@@ -122,8 +131,6 @@ def get_sensor_detail(pool_id):
         'main': main_data
     })
 
-
-
 @app.route('/api/v1/biofloc/history/<int:pool_id>', methods=['GET'])
 def get_sensor_history(pool_id):
     """
@@ -178,7 +185,7 @@ def get_biofloc_status(pool_id):
                     "ion_nitrato": 0, "carbon_demand": 0, "oxigeno_disuelto": 5.0, 
                     "ph": 7.0, "temperatura": 25.0, "estado_critico": False, 
                     "dosing_locked": False, "carbon_amount_gr": 0,
-                    "last_updated": "Sin datos",
+                    "last_updated_iso": None,
                     "data_age_minutes": 9999
                 })
 
@@ -192,10 +199,10 @@ def get_biofloc_status(pool_id):
                 if isinstance(timestamp, str):
                     timestamp = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
                 data_age = (datetime.now() - timestamp).total_seconds() / 60
-                last_updated = timestamp.strftime("%H:%M:%S")
+                last_updated_iso = timestamp.isoformat()
             else:
                 data_age = 9999
-                last_updated = "Desconocido"
+                last_updated_iso = None
             
             carbon_demand = (nitrato - 10.0) * 15.0 if nitrato > 10 else 0.0
             
@@ -208,7 +215,7 @@ def get_biofloc_status(pool_id):
                 "estado_critico": nitrato > 50.0 or o2 < 3.0,
                 "dosing_locked": o2 < 4.0,
                 "carbon_amount_gr": round(carbon_demand * 20.0, 2),
-                "last_updated": last_updated,
+                "last_updated_iso": last_updated_iso,
                 "data_age_minutes": round(data_age, 1)
             })
     except Exception as e:
@@ -451,4 +458,3 @@ def get_system_health():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080)
-
