@@ -1,7 +1,7 @@
 import os
 import math
 from datetime import datetime, timedelta
-
+import json
 import pandas as pd
 from flask import Flask, jsonify, request
 from flask_cors import CORS
@@ -526,49 +526,55 @@ def get_system_health():
                     "heartbeat": heartbeat
                 })
 
-            # ... dentro de get_system_health ...
-
-            # 1. Consulta REAL incluyendo la columna 'location'
-            q_logs = text("""
-                SELECT 
-                    u.name, 
-                    sl.status, 
-                    sl.ip_address, 
-                    sl.created_at, 
-                    sl.location
-                FROM session_logs sl
-                JOIN users u ON sl.user_id = u.id
-                ORDER BY sl.created_at DESC
-                LIMIT 5
-            """)
+            # ... (dentro de get_system_health, justo después de ejecutar q_logs) ...
             
             log_rows = conn.execute(q_logs).fetchall()
             logs = []
             
             for i, l in enumerate(log_rows):
-                # l[0]=User, l[1]=Status, l[2]=IP, l[3]=Time, l[4]=Location(JSON/String)
+                # l[0]=User, l[1]=Status, l[2]=IP, l[3]=Time, l[4]=Location(JSON)
                 
                 is_login = (l[1] == 'login')
                 
-                # Intentamos leer la ubicación si existe (es un campo JSON en tu DB)
-                ubicacion_str = "Ubicación desconocida"
-                if l[4]:
-                    # Si es un string simple o JSON, tratamos de mostrarlo limpio
-                    ubicacion_str = str(l[4]).replace('"', '').replace('{', '').replace('}', '')
+                # --- LÓGICA DE LIMPIEZA DE UBICACIÓN ---
+                ubicacion_str = ""
+                raw_loc = l[4]
                 
+                if raw_loc:
+                    try:
+                        # 1. Si viene como texto (string), lo convertimos a Diccionario
+                        if isinstance(raw_loc, str):
+                            loc_data = json.loads(raw_loc)
+                        else:
+                            # Si pymysql ya lo convirtió a dict
+                            loc_data = raw_loc
+                        
+                        # 2. Extraemos solo lo bonito (Ciudad, Región, País)
+                        # Usamos .get() para que no falle si falta algún dato
+                        ciudad = loc_data.get('cityName')
+                        region = loc_data.get('regionName')
+                        pais = loc_data.get('countryCode') or loc_data.get('countryName')
+                        
+                        # 3. Unimos las partes que existan con comas
+                        partes = [p for p in [ciudad, region, pais] if p]
+                        ubicacion_str = ", ".join(partes)
+                        
+                    except Exception:
+                        # Si el JSON está corrupto, no mostramos nada feo
+                        ubicacion_str = "Ubicación N/A"
+                
+                # Si no hay ubicación, solo mostramos la IP
+                detalle_final = f"Usuario: {l[0]} | IP: {l[2]}"
+                if ubicacion_str:
+                    detalle_final += f" | {ubicacion_str}"
+
                 logs.append({
                     "id": f"log-{i}",
                     "timestamp": l[3].strftime("%d/%m %H:%M") if l[3] else "--:--",
-                    
-                    # SEPARAMOS CLARAMENTE TÍTULO Y DETALLE:
-                    "action": "ACCESO AL SISTEMA" if is_login else "CIERRE DE SESIÓN",
-                    "type": "success" if is_login else "warning", 
-                    
-                    # Aquí construimos el detalle completo con IP y Ubicación
-                    "details": f"Usuario: {l[0]} | IP: {l[2]} | {ubicacion_str}"
+                    "action": "INICIO DE SESIÓN" if is_login else "CIERRE DE SESIÓN",
+                    "type": "success" if is_login else "warning",
+                    "details": detalle_final
                 })
-
-            # ... resto del código ...
 
             count = conn.execute(text("SELECT COUNT(*) FROM parametro_aguas WHERE deleted_at IS NULL")).fetchone()[0]
 
@@ -598,5 +604,6 @@ def get_system_health():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
+
 
 
