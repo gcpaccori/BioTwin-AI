@@ -526,20 +526,39 @@ def get_system_health():
                     "heartbeat": heartbeat
                 })
 
+            # ... dentro de get_system_health() ...
+
+            # --- CÓDIGO VIEJO (BORRAR) ---
+            # q_logs = text("SELECT id, name, type, created_at FROM accions ...") 
+            
+            # --- CÓDIGO NUEVO (CORREGIDO) ---
+            # Consultamos la tabla real de logs de sesión unida con usuarios
             q_logs = text("""
-                SELECT id, name, type, created_at
-                FROM accions
-                ORDER BY created_at DESC
-                LIMIT 5
+                SELECT u.name, sl.status, sl.ip_address, sl.created_at
+                FROM session_logs sl
+                JOIN users u ON sl.user_id = u.id
+                ORDER BY sl.created_at DESC
+                LIMIT 10
             """)
+            
             log_rows = conn.execute(q_logs).fetchall()
             logs = []
-            for l in log_rows:
+            
+            for i, l in enumerate(log_rows):
+                # l[0]=Nombre, l[1]=Login/Logout, l[2]=IP, l[3]=Fecha
+                
+                # Determinamos color según acción
+                level = "info"
+                if l[1] == 'logout': level = "warning"
+                
+                # Creamos un mensaje legible para humanos
+                mensaje = f"Usuario {l[0]} registró {l[1]} (IP: {l[2]})"
+                
                 logs.append({
-                    "id": l[0],
-                    "level": "warning" if "ALERTA" in str(l[2]) else "info",
-                    "message": f"{l[1]} ({l[2]})",
-                    "timestamp": l[3].strftime("%H:%M") if l[3] else "--:--"
+                    "id": f"log-{i}", 
+                    "level": level,
+                    "message": mensaje,
+                    "timestamp": l[3].strftime("%d/%m %H:%M") if l[3] else "--:--"
                 })
 
             count = conn.execute(text("SELECT COUNT(*) FROM parametro_aguas WHERE deleted_at IS NULL")).fetchone()[0]
@@ -570,3 +589,4 @@ def get_system_health():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
+
