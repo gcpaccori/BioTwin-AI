@@ -464,11 +464,11 @@ def get_oxygen_prediction(pool_id: int):
 def get_system_health():
     """
     Salud del sistema:
-    - last_seen lo tomamos de created_at (ingesta), que en tu caso sí viene bien.
-    - heartbeat también usa created_at.
+    - last_seen lo tomamos de created_at (ingesta).
     """
     try:
         with engine.connect() as conn:
+            # 1. Obtener Piscinas
             q_sensors = text("""
                 SELECT p.id, p.nombre, MAX(pa.created_at) AS last_seen
                 FROM piscinas p
@@ -480,6 +480,7 @@ def get_system_health():
             sensors_status = []
             now = datetime.now()
 
+            # 2. Procesar cada sensor (piscina)
             for row in rows:
                 pid, name, last_seen = row
 
@@ -497,11 +498,7 @@ def get_system_health():
                 for h in range(24):
                     hour_start = now - timedelta(hours=24 - h)
                     hour_end = hour_start + timedelta(hours=1)
-
-                    has_data = any(
-                        hour_start <= d[0] < hour_end
-                        for d in heartbeat_data if d and d[0]
-                    )
+                    has_data = any(hour_start <= d[0] < hour_end for d in heartbeat_data if d and d[0])
                     heartbeat.append({"hour": h, "active": has_data})
 
                 latency = 0
@@ -513,7 +510,6 @@ def get_system_health():
                     delta = now - last_seen_dt
                     latency = int(delta.total_seconds() * 1000)
                     last_seen_str = last_seen_dt.strftime("%H:%M:%S")
-
                     if latency < 600000:  # < 10 min
                         status = "online"
 
@@ -526,9 +522,8 @@ def get_system_health():
                     "heartbeat": heartbeat
                 })
 
-            # --- CORRECTION: Indentation fixed here ---
-            # This block is now OUTSIDE the 'for row in rows' loop
-            
+            # 3. Obtener Logs (ESTA ERA LA PARTE QUE FALLABA)
+            # Debe estar FUERA del bucle 'for row in rows', pero DENTRO del 'with engine.connect'
             q_logs = text("""
                 SELECT 
                     u.name, 
@@ -548,42 +543,45 @@ def get_system_health():
             for i, l in enumerate(log_rows):
                 is_login = (l[1] == 'login')
                 
-                # Logic to clean location JSON
+                # Limpieza de Ubicación
                 ubicacion_str = ""
                 raw_loc = l[4]
-                
                 if raw_loc:
                     try:
                         if isinstance(raw_loc, str):
-                            loc_data = json.loads(raw_loc)
+                            # Limpieza agresiva de JSON sucio
+                            clean_json = raw_loc.replace('\\', '').strip('"')
+                            loc_data = json.loads(clean_json)
                         else:
                             loc_data = raw_loc
                         
                         ciudad = loc_data.get('cityName')
                         region = loc_data.get('regionName')
-                        pais = loc_data.get('countryCode') or loc_data.get('countryName')
+                        pais = loc_data.get('countryName') or loc_data.get('countryCode')
                         
                         partes = [p for p in [ciudad, region, pais] if p]
-                        ubicacion_str = ", ".join(partes)
-                        
+                        if partes:
+                            ubicacion_str = f"Ubicación: {', '.join(partes)}"
+                        else:
+                            ubicacion_str = "Ubicación: (Datos vacíos)"
                     except Exception:
-                        ubicacion_str = "Ubicación N/A"
-                
+                        ubicacion_str = "Ubicación: N/A"
+                else:
+                    ubicacion_str = ""
+
                 detalle_final = f"Usuario: {l[0]} | IP: {l[2]}"
                 if ubicacion_str:
                     detalle_final += f" | {ubicacion_str}"
 
                 logs.append({
                     "id": f"log-{i}",
-                    
-                    # CAMBIO AQUÍ: Agregamos /%Y para que salga el año (ej: 06/01/2026)
                     "timestamp": l[3].strftime("%d/%m/%Y %H:%M") if l[3] else "--:--",
-                    
                     "action": "INICIO DE SESIÓN" if is_login else "CIERRE DE SESIÓN",
                     "type": "success" if is_login else "warning",
                     "details": detalle_final
                 })
 
+            # 4. Conteos finales
             count = conn.execute(text("SELECT COUNT(*) FROM parametro_aguas WHERE deleted_at IS NULL")).fetchone()[0]
 
             q_critical = text("""
@@ -605,13 +603,15 @@ def get_system_health():
                 "logs": logs,
                 "critical_alerts_today": critical_count
             })
+            
     except Exception as e:
         print(f"❌ system/health error: {e}")
-        # Return a JSON error response instead of crashing
         return jsonify({"error": str(e)}), 500
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
+
 
 
 
