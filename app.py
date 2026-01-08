@@ -575,7 +575,10 @@ def get_system_health():
 
                 logs.append({
                     "id": f"log-{i}",
-                    "timestamp": l[3].strftime("%d/%m %H:%M") if l[3] else "--:--",
+                    
+                    # CAMBIO AQUÍ: Agregamos /%Y para que salga el año (ej: 06/01/2026)
+                    "timestamp": l[3].strftime("%d/%m/%Y %H:%M") if l[3] else "--:--",
+                    
                     "action": "INICIO DE SESIÓN" if is_login else "CIERRE DE SESIÓN",
                     "type": "success" if is_login else "warning",
                     "details": detalle_final
@@ -609,6 +612,7 @@ def get_system_health():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
+
 
 
 
